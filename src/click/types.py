@@ -48,7 +48,19 @@ class ParamType:
 
         .. versionadded:: 8.0
         """
-        pass
+        return {
+            "name": self.name,
+            "param_type_name": self.param_type_name,
+            "opts": self.opts,
+            "secondary_opts": self.secondary_opts,
+            "type": str(self.type),
+            "required": self.required,
+            "nargs": self.nargs,
+            "multiple": self.multiple,
+            "default": self.default,
+            "envvar": self.envvar,
+            "help": self.help,
+        }
 
     def __call__(self, value: t.Any, param: t.Optional['Parameter']=None, ctx: t.Optional['Context']=None) -> t.Any:
         if value is not None:
@@ -56,7 +68,11 @@ class ParamType:
 
     def get_metavar(self, param: 'Parameter') -> t.Optional[str]:
         """Returns the metavar default for this param if it provides one."""
-        pass
+        if self.metavar is not None:
+            return self.metavar
+        elif self.name is not None:
+            return self.name.upper()
+        return None
 
     def get_missing_message(self, param: 'Parameter') -> t.Optional[str]:
         """Optionally might return extra information about a missing
@@ -64,7 +80,9 @@ class ParamType:
 
         .. versionadded:: 2.0
         """
-        pass
+        if self.required:
+            return f"Missing required parameter: {param.name}"
+        return None
 
     def convert(self, value: t.Any, param: t.Optional['Parameter'], ctx: t.Optional['Context']) -> t.Any:
         """Convert the value to the correct type. This is not called if
@@ -86,7 +104,10 @@ class ParamType:
         :param ctx: The current context that arrived at this value. May
             be ``None``.
         """
-        pass
+        try:
+            return self.type(value)
+        except ValueError:
+            self.fail(f"'{value}' is not a valid {self.name}", param, ctx)
 
     def split_envvar_value(self, rv: str) -> t.Sequence[str]:
         """Given a value from an environment variable this splits it up
@@ -96,11 +117,14 @@ class ParamType:
         then leading and trailing whitespace is ignored.  Otherwise, leading
         and trailing splitters usually lead to empty items being included.
         """
-        pass
+        if self.envvar_list_splitter is None:
+            return [x.strip() for x in rv.split()]
+        return rv.split(self.envvar_list_splitter)
 
     def fail(self, message: str, param: t.Optional['Parameter']=None, ctx: t.Optional['Context']=None) -> 't.NoReturn':
         """Helper method to fail with an invalid value message."""
-        pass
+        from .exceptions import BadParameter
+        raise BadParameter(message, ctx=ctx, param=param)
 
     def shell_complete(self, ctx: 'Context', param: 'Parameter', incomplete: str) -> t.List['CompletionItem']:
         """Return a list of
@@ -115,7 +139,7 @@ class ParamType:
 
         .. versionadded:: 8.0
         """
-        pass
+        return []
 
 class CompositeParamType(ParamType):
     is_composite = True
@@ -172,7 +196,17 @@ class Choice(ParamType):
 
         .. versionadded:: 8.0
         """
-        pass
+        from .shell_completion import CompletionItem
+
+        str_choices = [str(choice) for choice in self.choices]
+
+        if self.case_sensitive:
+            matched = [choice for choice in str_choices if choice.startswith(incomplete)]
+        else:
+            incomplete = incomplete.lower()
+            matched = [choice for choice in str_choices if choice.lower().startswith(incomplete)]
+
+        return [CompletionItem(choice) for choice in matched]
 
 class DateTime(ParamType):
     """The DateTime type converts date strings into `datetime` objects.
@@ -222,11 +256,24 @@ class _NumberRangeBase(_NumberParamTypeBase):
         :param dir: 1 or -1 indicating the direction to move.
         :param open: If true, the range does not include the bound.
         """
-        pass
+        if not open:
+            return bound
+        
+        # Move away from the bound by the smallest possible increment
+        return bound + dir * sys.float_info.epsilon
 
     def _describe_range(self) -> str:
         """Describe the range for use in help text."""
-        pass
+        if self.min is None and self.max is None:
+            return "any value"
+        
+        if self.min is not None and self.max is not None:
+            return f"{self.min}{' (exclusive)' if self.min_open else ''} to {self.max}{' (exclusive)' if self.max_open else ''}"
+        
+        if self.min is not None:
+            return f"{self.min}{' (exclusive)' if self.min_open else ''} or greater"
+        
+        return f"{self.max}{' (exclusive)' if self.max_open else ''} or less"
 
     def __repr__(self) -> str:
         clamp = ' clamped' if self.clamp else ''
@@ -342,7 +389,8 @@ class File(ParamType):
 
         .. versionadded:: 8.0
         """
-        pass
+        from .shell_completion import CompletionItem
+        return [CompletionItem(incomplete, type='file')]
 
 class Path(ParamType):
     """The ``Path`` type is similar to the :class:`File` type, but
@@ -430,7 +478,29 @@ def convert_type(ty: t.Optional[t.Any], default: t.Optional[t.Any]=None) -> Para
     type. If the type isn't provided, it can be inferred from a default
     value.
     """
-    pass
+    if ty is None and default is not None:
+        ty = type(default)
+
+    if isinstance(ty, ParamType):
+        return ty
+    if ty is str or ty is None:
+        return STRING
+    if ty is int:
+        return INT
+    if ty is float:
+        return FLOAT
+    if ty is bool:
+        return BOOL
+    if ty is uuid.UUID:
+        return UUID
+    if hasattr(ty, '__origin__') and ty.__origin__ is t.Union:
+        for t in ty.__args__:
+            if t is not type(None):
+                return convert_type(t)
+    if isinstance(ty, tuple):
+        return Tuple(ty)
+
+    return STRING
 UNPROCESSED = UnprocessedParamType()
 STRING = StringParamType()
 INT = IntParamType()
