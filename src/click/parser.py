@@ -44,7 +44,20 @@ def _unpack_args(args: t.Sequence[str], nargs_spec: t.Sequence[int]) -> t.Tuple[
 
     Missing items are filled with `None`.
     """
-    pass
+    args = list(args)
+    nargs_spec = list(nargs_spec)
+    rv = []
+    spos = 0
+
+    for nargs in nargs_spec:
+        if nargs == -1:
+            rv.append(tuple(args[spos:]))
+            spos = len(args)
+        else:
+            rv.append(tuple(args[spos:spos + nargs] + [None] * (nargs - len(args[spos:spos + nargs]))))
+            spos += nargs
+
+    return (rv, args[spos:])
 
 def split_arg_string(string: str) -> t.List[str]:
     """Split an argument string as with :func:`shlex.split`, but don't
@@ -61,7 +74,14 @@ def split_arg_string(string: str) -> t.List[str]:
 
     :param string: String to split.
     """
-    pass
+    import shlex
+    lex = shlex.shlex(string, posix=True)
+    lex.whitespace_split = True
+    lex.commenters = ''
+    try:
+        return list(lex)
+    except ValueError:
+        return string.split()
 
 class Option:
 
@@ -137,7 +157,12 @@ class OptionParser:
         The `obj` can be used to identify the option in the order list
         that is returned from the parser.
         """
-        pass
+        option = Option(obj, opts, dest, action=action, nargs=nargs, const=const)
+        self._opt_prefixes.update(option.prefixes)
+        for opt in option._short_opts:
+            self._short_opt[opt] = option
+        for opt in option._long_opts:
+            self._long_opt[opt] = option
 
     def add_argument(self, obj: 'CoreArgument', dest: t.Optional[str], nargs: int=1) -> None:
         """Adds a positional argument named `dest` to the parser.
@@ -145,7 +170,7 @@ class OptionParser:
         The `obj` can be used to identify the option in the order list
         that is returned from the parser.
         """
-        pass
+        self._args.append(Argument(obj, dest, nargs))
 
     def parse_args(self, args: t.List[str]) -> t.Tuple[t.Dict[str, t.Any], t.List[str], t.List['CoreParameter']]:
         """Parses positional arguments and returns ``(values, args, order)``
@@ -154,4 +179,11 @@ class OptionParser:
         appear on the command line.  If arguments appear multiple times they
         will be memorized multiple times as well.
         """
-        pass
+        state = ParsingState(args)
+        try:
+            self._process_args_for_options(state)
+            self._process_args_for_args(state)
+        except UsageError:
+            if self.ctx is None or not self.ctx.resilient_parsing:
+                raise
+        return state.opts, state.largs, state.order
