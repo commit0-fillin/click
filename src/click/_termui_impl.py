@@ -107,34 +107,115 @@ class ProgressBar(t.Generic[V]):
 
         .. versionchanged:: 8.0
             Only render when the number of steps meets the
-            ``update_min_steps`` threshold.
+            update_min_steps threshold.
         """
-        pass
+        self.pos += n_steps
+        if current_item is not None:
+            self.current_item = current_item
+        self._completed_intervals += n_steps
+
+        if self._completed_intervals >= self.update_min_steps:
+            self._completed_intervals = 0
+            self.render_progress()
 
     def generator(self) -> t.Iterator[V]:
         """Return a generator which yields the items added to the bar
         during construction, and updates the progress bar *after* the
         yielded block returns.
         """
-        pass
+        if self.length is None:
+            raise RuntimeError("You need to specify the length of the iterable if you want to use it as a generator.")
+
+        for item in self.iter:
+            yield item
+            self.update(1, item)
+
+        self.render_finish()
 
 def pager(generator: t.Iterable[str], color: t.Optional[bool]=None) -> None:
     """Decide what method to use for paging through text."""
-    pass
+    stdout = _default_text_stdout()
+    if not isatty(stdout):
+        return _nullpager(stdout, generator, color)
+
+    pager_cmd = os.environ.get('PAGER', None)
+    if pager_cmd:
+        if WIN:
+            return _tempfilepager(generator, pager_cmd, color)
+        return _pipepager(generator, pager_cmd, color)
+
+    if os.name == 'nt':
+        return _tempfilepager(generator, 'more', color)
+
+    import tempfile
+    import subprocess
+
+    def fallback():
+        return _nullpager(stdout, generator, color)
+
+    for cmd in ('less', 'more'):
+        try:
+            with tempfile.NamedTemporaryFile() as f:
+                cmd = subprocess.Popen([cmd, f.name], shell=True)
+                cmd.wait()
+                if cmd.returncode == 0:
+                    return _pipepager(generator, cmd, color)
+        except OSError:
+            pass
+
+    return fallback()
 
 def _pipepager(generator: t.Iterable[str], cmd: str, color: t.Optional[bool]) -> None:
     """Page through text by feeding it to another program.  Invoking a
     pager through this might support colors.
     """
-    pass
+    import subprocess
+    env = dict(os.environ)
+    env['LESS'] = 'FRSX'
+
+    c = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE, env=env)
+    encoding = getattr(c.stdin, 'encoding', None)
+    if encoding is None:
+        encoding = 'utf-8'
+
+    try:
+        for text in generator:
+            if not color:
+                text = strip_ansi(text)
+            c.stdin.write(text.encode(encoding, 'replace'))
+    except (OSError, KeyboardInterrupt):
+        pass
+    else:
+        c.stdin.close()
+
+    while True:
+        try:
+            c.wait()
+        except KeyboardInterrupt:
+            pass
+        else:
+            break
 
 def _tempfilepager(generator: t.Iterable[str], cmd: str, color: t.Optional[bool]) -> None:
     """Page through text by invoking a program on a temporary file."""
-    pass
+    import tempfile
+    filename = tempfile.mktemp()
+    with open(filename, 'w', encoding='utf-8') as f:
+        for text in generator:
+            if not color:
+                text = strip_ansi(text)
+            f.write(text)
+    try:
+        os.system(cmd + ' "' + filename + '"')
+    finally:
+        os.unlink(filename)
 
 def _nullpager(stream: t.TextIO, generator: t.Iterable[str], color: t.Optional[bool]) -> None:
     """Simply print unformatted text.  This is the ultimate fallback."""
-    pass
+    for text in generator:
+        if not color:
+            text = strip_ansi(text)
+        stream.write(text)
 
 class Editor:
 
