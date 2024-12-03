@@ -25,7 +25,21 @@ def shell_complete(cli: BaseCommand, ctx_args: t.MutableMapping[str, t.Any], pro
         instruction and shell, in the form ``instruction_shell``.
     :return: Status code to exit with.
     """
-    pass
+    shell, _, instruction = instruction.partition("_")
+    comp_cls = get_completion_class(shell)
+    if comp_cls is None:
+        return 1
+
+    comp = comp_cls(cli, ctx_args, prog_name, complete_var)
+
+    if instruction == "source":
+        echo(comp.source())
+        return 0
+    elif instruction == "complete":
+        echo(comp.complete())
+        return 0
+
+    return 1
 
 class CompletionItem:
     """Represents a completion value and metadata about the value. The
@@ -87,7 +101,7 @@ class ShellComplete:
         """The name of the shell function defined by the completion
         script.
         """
-        pass
+        return f"_{self.prog_name}_completion"
 
     def source_vars(self) -> t.Dict[str, t.Any]:
         """Vars for formatting :attr:`source_template`.
@@ -95,7 +109,11 @@ class ShellComplete:
         By default this provides ``complete_func``, ``complete_var``,
         and ``prog_name``.
         """
-        pass
+        return {
+            "complete_func": self.func_name,
+            "complete_var": self.complete_var,
+            "prog_name": self.prog_name,
+        }
 
     def source(self) -> str:
         """Produce the shell script that defines the completion
@@ -103,14 +121,14 @@ class ShellComplete:
         :attr:`source_template` with the dict returned by
         :meth:`source_vars`.
         """
-        pass
+        return self.source_template % self.source_vars()
 
     def get_completion_args(self) -> t.Tuple[t.List[str], str]:
         """Use the env vars defined by the shell script to return a
         tuple of ``args, incomplete``. This must be implemented by
         subclasses.
         """
-        pass
+        raise NotImplementedError
 
     def get_completions(self, args: t.List[str], incomplete: str) -> t.List[CompletionItem]:
         """Determine the context and last complete command or parameter
@@ -120,7 +138,9 @@ class ShellComplete:
         :param args: List of complete args before the incomplete value.
         :param incomplete: Value being completed. May be empty.
         """
-        pass
+        ctx = _resolve_context(self.cli, self.ctx_args, self.prog_name, args)
+        obj, incomplete = _resolve_incomplete(ctx, args, incomplete)
+        return obj.shell_complete(ctx, incomplete)
 
     def format_completion(self, item: CompletionItem) -> str:
         """Format a completion item into the form recognized by the
@@ -128,7 +148,7 @@ class ShellComplete:
 
         :param item: Completion item to format.
         """
-        pass
+        raise NotImplementedError
 
     def complete(self) -> str:
         """Produce the completion data to send back to the shell.
@@ -137,7 +157,9 @@ class ShellComplete:
         completions, then calls :meth:`format_completion` for each
         completion.
         """
-        pass
+        args, incomplete = self.get_completion_args()
+        completions = self.get_completions(args, incomplete)
+        return "\n".join(self.format_completion(item) for item in completions)
 
 class BashComplete(ShellComplete):
     """Shell completion for Bash."""
@@ -166,7 +188,11 @@ def add_completion_class(cls: ShellCompleteType, name: t.Optional[str]=None) -> 
     :param name: Name to register the class under. Defaults to the
         class's ``name`` attribute.
     """
-    pass
+    if name is None:
+        name = cls.name
+
+    _available_shells[name] = cls
+    return cls
 
 def get_completion_class(shell: str) -> t.Optional[t.Type[ShellComplete]]:
     """Look up a registered :class:`ShellComplete` subclass by the name
@@ -175,7 +201,7 @@ def get_completion_class(shell: str) -> t.Optional[t.Type[ShellComplete]]:
 
     :param shell: Name the class is registered under.
     """
-    pass
+    return _available_shells.get(shell)
 
 def _is_incomplete_argument(ctx: Context, param: Parameter) -> bool:
     """Determine if the given parameter is an argument that can still
@@ -185,11 +211,22 @@ def _is_incomplete_argument(ctx: Context, param: Parameter) -> bool:
         parsed complete args.
     :param param: Argument object being checked.
     """
-    pass
+    if not isinstance(param, Argument):
+        return False
+
+    value = ctx.params.get(param.name)
+
+    if value is None:
+        return True
+
+    if isinstance(value, (tuple, list)):
+        return param.nargs == -1 or len(value) < param.nargs
+
+    return False
 
 def _start_of_option(ctx: Context, value: str) -> bool:
     """Check if the value looks like the start of an option."""
-    pass
+    return value and value[0] in ctx.command.params.get('_opt_prefixes', ['-'])
 
 def _is_incomplete_option(ctx: Context, args: t.List[str], param: Parameter) -> bool:
     """Determine if the given parameter is an option that needs a value.
@@ -197,7 +234,22 @@ def _is_incomplete_option(ctx: Context, args: t.List[str], param: Parameter) -> 
     :param args: List of complete args before the incomplete value.
     :param param: Option object being checked.
     """
-    pass
+    if not isinstance(param, Option):
+        return False
+
+    if param.is_flag:
+        return False
+
+    last_option = None
+
+    for index, arg in enumerate(reversed(args)):
+        if index + 1 > param.nargs:
+            break
+
+        if _start_of_option(ctx, arg):
+            last_option = arg
+
+    return last_option is not None and last_option in param.opts
 
 def _resolve_context(cli: BaseCommand, ctx_args: t.MutableMapping[str, t.Any], prog_name: str, args: t.List[str]) -> Context:
     """Produce the context hierarchy starting with the command and
@@ -208,7 +260,31 @@ def _resolve_context(cli: BaseCommand, ctx_args: t.MutableMapping[str, t.Any], p
     :param prog_name: Name of the executable in the shell.
     :param args: List of complete args before the incomplete value.
     """
-    pass
+    ctx = cli.make_context(prog_name, args, **ctx_args)
+
+    while args:
+        if isinstance(ctx.command, MultiCommand):
+            if not ctx.command.chain:
+                name, cmd, args = ctx.command.resolve_command(ctx, args)
+
+                if cmd is None:
+                    return ctx
+
+                ctx = cmd.make_context(name, args, parent=ctx, resilient_parsing=True)
+                args = ctx.protected_args + ctx.args
+            else:
+                name, cmd, args = ctx.command.resolve_command(ctx, args)
+
+                if cmd is None:
+                    return ctx
+
+                sub_ctx = cmd.make_context(name, args, parent=ctx, resilient_parsing=True)
+                args = sub_ctx.protected_args + sub_ctx.args
+                ctx.command = cmd
+        else:
+            break
+
+    return ctx
 
 def _resolve_incomplete(ctx: Context, args: t.List[str], incomplete: str) -> t.Tuple[t.Union[BaseCommand, Parameter], str]:
     """Find the Click object that will handle the completion of the
@@ -219,4 +295,14 @@ def _resolve_incomplete(ctx: Context, args: t.List[str], incomplete: str) -> t.T
     :param args: List of complete args before the incomplete value.
     :param incomplete: Value being completed. May be empty.
     """
-    pass
+    params = ctx.command.get_params(ctx)
+
+    for param in params:
+        if _is_incomplete_option(ctx, args, param):
+            return param, incomplete
+
+    for param in params:
+        if _is_incomplete_argument(ctx, param):
+            return param, incomplete
+
+    return ctx.command, incomplete
