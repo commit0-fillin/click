@@ -23,14 +23,20 @@ def pass_context(f: 't.Callable[te.Concatenate[Context, P], R]') -> 't.Callable[
     """Marks a callback as wanting to receive the current context
     object as first argument.
     """
-    pass
+    @t.wraps(f)
+    def new_func(*args: P.args, **kwargs: P.kwargs) -> R:
+        return f(get_current_context(), *args, **kwargs)
+    return t.cast('t.Callable[P, R]', new_func)
 
 def pass_obj(f: 't.Callable[te.Concatenate[t.Any, P], R]') -> 't.Callable[P, R]':
     """Similar to :func:`pass_context`, but only pass the object on the
     context onwards (:attr:`Context.obj`).  This is useful if that object
     represents the state of a nested system.
     """
-    pass
+    @t.wraps(f)
+    def new_func(*args: P.args, **kwargs: P.kwargs) -> R:
+        return f(get_current_context().obj, *args, **kwargs)
+    return t.cast('t.Callable[P, R]', new_func)
 
 def make_pass_decorator(object_type: t.Type[T], ensure: bool=False) -> t.Callable[['t.Callable[te.Concatenate[T, P], R]'], 't.Callable[P, R]']:
     """Given an object type this creates a decorator that will work
@@ -54,7 +60,19 @@ def make_pass_decorator(object_type: t.Type[T], ensure: bool=False) -> t.Callabl
     :param ensure: if set to `True`, a new object will be created and
                    remembered on the context if it's not there yet.
     """
-    pass
+    def decorator(f: 't.Callable[te.Concatenate[T, P], R]') -> 't.Callable[P, R]':
+        @t.wraps(f)
+        def new_func(*args: P.args, **kwargs: P.kwargs) -> R:
+            ctx = get_current_context()
+            obj = ctx.find_object(object_type)
+            if obj is None and ensure:
+                obj = object_type()
+                ctx.ensure_object(object_type)
+            if obj is None:
+                raise RuntimeError(f'Managed to invoke callback without a context object of type {object_type.__name__} existing')
+            return ctx.invoke(f, obj, *args, **kwargs)
+        return t.cast('t.Callable[P, R]', new_func)
+    return decorator
 
 def pass_meta_key(key: str, *, doc_description: t.Optional[str]=None) -> 't.Callable[[t.Callable[te.Concatenate[t.Any, P], R]], t.Callable[P, R]]':
     """Create a decorator that passes a key from
@@ -68,7 +86,21 @@ def pass_meta_key(key: str, *, doc_description: t.Optional[str]=None) -> 't.Call
 
     .. versionadded:: 8.0
     """
-    pass
+    if doc_description is None:
+        doc_description = f"the {key!r} key from Context.meta"
+
+    def decorator(f: t.Callable[te.Concatenate[t.Any, P], R]) -> t.Callable[P, R]:
+        @t.wraps(f)
+        def new_func(*args: P.args, **kwargs: P.kwargs) -> R:
+            ctx = get_current_context()
+            if key not in ctx.meta:
+                raise RuntimeError(f"'{key}' not found in Context.meta")
+            return f(ctx.meta[key], *args, **kwargs)
+
+        new_func.__doc__ = f"Decorator that passes {doc_description} as the first argument to the decorated function.\n\n{new_func.__doc__}"
+        return t.cast('t.Callable[P, R]', new_func)
+
+    return decorator
 CmdType = t.TypeVar('CmdType', bound=Command)
 
 def command(name: t.Union[t.Optional[str], _AnyCallable]=None, cls: t.Optional[t.Type[CmdType]]=None, **attrs: t.Any) -> t.Union[Command, t.Callable[[_AnyCallable], t.Union[Command, CmdType]]]:
