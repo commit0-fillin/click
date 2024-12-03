@@ -12,11 +12,12 @@ _ansi_re = re.compile('\\033\\[[;?0-9]*[a-zA-Z]')
 
 def is_ascii_encoding(encoding: str) -> bool:
     """Checks if a given encoding is ascii."""
-    pass
+    return encoding.replace("-", "").lower() in {"ascii", "usascii"}
 
 def get_best_encoding(stream: t.IO[t.Any]) -> str:
     """Returns the default stream encoding if not found."""
-    pass
+    rv = getattr(stream, "encoding", None) or sys.getdefaultencoding()
+    return rv if rv != "ascii" else "utf-8"
 
 class _NonClosingTextIOWrapper(io.TextIOWrapper):
 
@@ -28,6 +29,7 @@ class _NonClosingTextIOWrapper(io.TextIOWrapper):
         try:
             self.detach()
         except Exception:
+            # Ignore any exception during detach in destructor
             pass
 
 class _FixupStream:
@@ -50,24 +52,27 @@ class _FixupStream:
 
 def _stream_is_misconfigured(stream: t.TextIO) -> bool:
     """A stream is misconfigured if its encoding is ASCII."""
-    pass
+    return is_ascii_encoding(getattr(stream, "encoding", None) or "")
 
 def _is_compat_stream_attr(stream: t.TextIO, attr: str, value: t.Optional[str]) -> bool:
     """A stream attribute is compatible if it is equal to the
     desired value or the desired value is unset and the attribute
     has a value.
     """
-    pass
+    stream_value = getattr(stream, attr, None)
+    return stream_value == value or (value is None and stream_value is not None)
 
 def _is_compatible_text_stream(stream: t.TextIO, encoding: t.Optional[str], errors: t.Optional[str]) -> bool:
     """Check if a stream's encoding and errors attributes are
     compatible with the desired values.
     """
-    pass
+    return _is_compat_stream_attr(stream, "encoding", encoding) and _is_compat_stream_attr(stream, "errors", errors)
 
 def _wrap_io_open(file: t.Union[str, 'os.PathLike[str]', int], mode: str, encoding: t.Optional[str], errors: t.Optional[str]) -> t.IO[t.Any]:
     """Handles not passing ``encoding`` and ``errors`` in binary mode."""
-    pass
+    if "b" in mode:
+        return open(file, mode)
+    return open(file, mode, encoding=encoding, errors=errors)
 
 class _AtomicFile:
 
@@ -96,7 +101,21 @@ if sys.platform.startswith('win') and WIN:
         """Support ANSI color and style codes on Windows by wrapping a
         stream with colorama.
         """
-        pass
+        try:
+            import colorama
+        except ImportError:
+            return stream
+
+        if isinstance(stream, colorama.AnsiToWin32):
+            return stream
+
+        strip = color is False
+        if not strip and (color is None or color is True):
+            strip = not _get_windows_console_stream(stream) or not colorama.enable_ansi_on_windows()
+
+        wrapper = colorama.AnsiToWin32(stream, strip=strip)
+        _ansi_stream_wrappers[stream] = wrapper
+        return wrapper
 _default_text_stdin = _make_cached_stream_func(lambda: sys.stdin, get_text_stdin)
 _default_text_stdout = _make_cached_stream_func(lambda: sys.stdout, get_text_stdout)
 _default_text_stderr = _make_cached_stream_func(lambda: sys.stderr, get_text_stderr)
