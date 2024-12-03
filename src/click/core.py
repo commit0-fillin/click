@@ -48,19 +48,36 @@ def _complete_visible_commands(ctx: 'Context', incomplete: str) -> t.Iterator[t.
     :param ctx: Invocation context for the group.
     :param incomplete: Value being completed. May be empty.
     """
-    pass
+    if isinstance(ctx.command, MultiCommand):
+        for name in ctx.command.list_commands(ctx):
+            cmd = ctx.command.get_command(ctx, name)
+            if cmd is not None and not cmd.hidden and name.startswith(incomplete):
+                yield (name, cmd)
 
 @contextmanager
 def augment_usage_errors(ctx: 'Context', param: t.Optional['Parameter']=None) -> t.Iterator[None]:
     """Context manager that attaches extra information to exceptions."""
-    pass
+    try:
+        yield
+    except UsageError as e:
+        if e.ctx is None:
+            e.ctx = ctx
+        if param is not None and e.param is None:
+            e.param = param
+        raise
 
 def iter_params_for_processing(invocation_order: t.Sequence['Parameter'], declaration_order: t.Sequence['Parameter']) -> t.List['Parameter']:
     """Given a sequence of parameters in the order as should be considered
     for processing and an iterable of parameters that exist, this returns
     a list in the correct order as they should be processed.
     """
-    pass
+    def sort_key(param):
+        if param.is_eager:
+            return (0, param.name)
+        else:
+            return (1, invocation_order.index(param))
+
+    return sorted(declaration_order, key=sort_key)
 
 class ParameterSource(enum.Enum):
     """This is an :class:`~enum.Enum` that indicates the source of a
@@ -296,7 +313,22 @@ class Context:
                         temporarily pushed in which case this can be disabled.
                         Nested pushes automatically defer the cleanup.
         """
-        pass
+        if self._depth == 0:
+            self._depth += 1
+            try:
+                push_context(self)
+                yield self
+            finally:
+                self._depth -= 1
+                if cleanup:
+                    self.close()
+                pop_context()
+        else:
+            self._depth += 1
+            try:
+                yield self
+            finally:
+                self._depth -= 1
 
     @property
     def meta(self) -> t.Dict[str, t.Any]:
@@ -324,7 +356,7 @@ class Context:
 
         .. versionadded:: 5.0
         """
-        pass
+        return self._meta
 
     def make_formatter(self) -> HelpFormatter:
         """Creates the :class:`~click.HelpFormatter` for the help and
@@ -336,7 +368,10 @@ class Context:
         .. versionchanged:: 8.0
             Added the :attr:`formatter_class` attribute.
         """
-        pass
+        return self.formatter_class(
+            width=self.terminal_width,
+            max_width=self.max_content_width
+        )
 
     def with_resource(self, context_manager: t.ContextManager[V]) -> V:
         """Register a resource as if it were used in a ``with``
@@ -365,7 +400,7 @@ class Context:
 
         .. versionadded:: 8.0
         """
-        pass
+        return self._exit_stack.enter_context(context_manager)
 
     def call_on_close(self, f: t.Callable[..., t.Any]) -> t.Callable[..., t.Any]:
         """Register a function to be called when the context tears down.
@@ -377,14 +412,18 @@ class Context:
 
         :param f: The function to execute on teardown.
         """
-        pass
+        self._close_callbacks.append(f)
+        return f
 
     def close(self) -> None:
         """Invoke all close callbacks registered with
         :meth:`call_on_close`, and exit all context managers entered
         with :meth:`with_resource`.
         """
-        pass
+        for cb in reversed(self._close_callbacks):
+            cb()
+        self._close_callbacks.clear()
+        self._exit_stack.close()
 
     @property
     def command_path(self) -> str:
@@ -392,21 +431,33 @@ class Context:
         information on the help page.  It's automatically created by
         combining the info names of the chain of contexts to the root.
         """
-        pass
+        rv = ''
+        for ctx in reversed(self.parents):
+            rv = f"{ctx.info_name} {rv}"
+        return (rv + self.info_name).strip()
 
     def find_root(self) -> 'Context':
         """Finds the outermost context."""
-        pass
+        current = self
+        while current.parent is not None:
+            current = current.parent
+        return current
 
     def find_object(self, object_type: t.Type[V]) -> t.Optional[V]:
         """Finds the closest object of a given type."""
-        pass
+        for ctx in chain((self,), reversed(self.parents)):
+            if isinstance(ctx.obj, object_type):
+                return ctx.obj
+        return None
 
     def ensure_object(self, object_type: t.Type[V]) -> V:
         """Like :meth:`find_object` but sets the innermost object to a
         new instance of `object_type` if it does not exist.
         """
-        pass
+        rv = self.find_object(object_type)
+        if rv is None:
+            self.obj = rv = object_type()
+        return rv
 
     def lookup_default(self, name: str, call: bool=True) -> t.Optional[t.Any]:
         """Get the default for a parameter from :attr:`default_map`.
@@ -418,7 +469,12 @@ class Context:
         .. versionchanged:: 8.0
             Added the ``call`` parameter.
         """
-        pass
+        if self.default_map is None:
+            return None
+        value = self.default_map.get(name)
+        if call and callable(value):
+            return value()
+        return value
 
     def fail(self, message: str) -> 'te.NoReturn':
         """Aborts the execution of the program with a specific error
@@ -426,27 +482,31 @@ class Context:
 
         :param message: the error message to fail with.
         """
-        pass
+        raise UsageError(message, self)
 
     def abort(self) -> 'te.NoReturn':
         """Aborts the script."""
-        pass
+        raise Abort()
 
     def exit(self, code: int=0) -> 'te.NoReturn':
         """Exits the application with a given exit code."""
-        pass
+        raise Exit(code)
 
     def get_usage(self) -> str:
         """Helper method to get formatted usage string for the current
         context and command.
         """
-        pass
+        formatter = self.make_formatter()
+        self.command.format_usage(self, formatter)
+        return formatter.getvalue().rstrip("\n")
 
     def get_help(self) -> str:
         """Helper method to get formatted help page for the current
         context and command.
         """
-        pass
+        formatter = self.make_formatter()
+        self.command.format_help(self, formatter)
+        return formatter.getvalue().rstrip("\n")
 
     def _make_sub_context(self, command: 'Command') -> 'Context':
         """Create a new context of the same type as this context, but
@@ -454,7 +514,18 @@ class Context:
 
         :meta private:
         """
-        pass
+        return type(self)(
+            command,
+            info_name=command.name,
+            parent=self,
+            allow_extra_args=self.allow_extra_args,
+            allow_interspersed_args=self.allow_interspersed_args,
+            ignore_unknown_options=self.ignore_unknown_options,
+            help_option_names=self.help_option_names,
+            token_normalize_func=self.token_normalize_func,
+            color=self.color,
+            show_default=self.show_default,
+        )
 
     def invoke(__self, __callback: t.Union['Command', 't.Callable[..., V]'], *args: t.Any, **kwargs: t.Any) -> t.Union[t.Any, V]:
         """Invokes a command callback in exactly the way it expects.  There
@@ -476,7 +547,13 @@ class Context:
             All ``kwargs`` are tracked in :attr:`params` so they will be
             passed if :meth:`forward` is called at multiple levels.
         """
-        pass
+        if isinstance(__callback, Command):
+            return __callback.invoke(__self)
+
+        __self.params.update(kwargs)
+        with augment_usage_errors(__self):
+            with __self.scope(cleanup=False):
+                return __callback(*args, **kwargs)
 
     def forward(__self, __cmd: 'Command', *args: t.Any, **kwargs: t.Any) -> t.Any:
         """Similar to :meth:`invoke` but fills in default keyword
@@ -487,7 +564,13 @@ class Context:
             All ``kwargs`` are tracked in :attr:`params` so they will be
             passed if ``forward`` is called at multiple levels.
         """
-        pass
+        __self.params.update(kwargs)
+
+        for param in __cmd.params:
+            if param.name not in kwargs and param.name in __self.params:
+                kwargs[param.name] = __self.params[param.name]
+
+        return __self.invoke(__cmd, *args, **kwargs)
 
     def set_parameter_source(self, name: str, source: ParameterSource) -> None:
         """Set the source of a parameter. This indicates the location
@@ -496,7 +579,7 @@ class Context:
         :param name: The name of the parameter.
         :param source: A member of :class:`~click.core.ParameterSource`.
         """
-        pass
+        self._parameter_source[name] = source
 
     def get_parameter_source(self, name: str) -> t.Optional[ParameterSource]:
         """Get the source of a parameter. This indicates the location
@@ -514,7 +597,7 @@ class Context:
             Returns ``None`` if the parameter was not provided from any
             source.
         """
-        pass
+        return self._parameter_source.get(name)
 
 class BaseCommand:
     """The base command implements the minimal API contract of commands.
@@ -560,7 +643,12 @@ class BaseCommand:
 
         .. versionadded:: 8.0
         """
-        pass
+        return {
+            "name": self.name,
+            "help": self.help,
+            "usage": self.get_usage(ctx),
+            "short_help": self.get_short_help_str(),
+        }
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} {self.name}>'
@@ -586,20 +674,27 @@ class BaseCommand:
         .. versionchanged:: 8.0
             Added the :attr:`context_class` attribute.
         """
-        pass
+        for key, value in self.context_settings.items():
+            if key not in extra:
+                extra[key] = value
+
+        ctx = self.context_class(self, info_name=info_name, parent=parent, **extra)
+        with ctx.scope(cleanup=False):
+            self.parse_args(ctx, args)
+        return ctx
 
     def parse_args(self, ctx: Context, args: t.List[str]) -> t.List[str]:
         """Given a context and a list of arguments this creates the parser
         and parses the arguments, then modifies the context as necessary.
         This is automatically invoked by :meth:`make_context`.
         """
-        pass
+        return args
 
     def invoke(self, ctx: Context) -> t.Any:
         """Given a context, this invokes the command.  The default
         implementation is raising a not implemented error.
         """
-        pass
+        raise NotImplementedError("Command subclass did not implement invoke method")
 
     def shell_complete(self, ctx: Context, incomplete: str) -> t.List['CompletionItem']:
         """Return a list of completions for the incomplete value. Looks
@@ -614,7 +709,17 @@ class BaseCommand:
 
         .. versionadded:: 8.0
         """
-        pass
+        from .shell_completion import CompletionItem
+
+        results = []
+        if isinstance(ctx.parent, MultiCommand):
+            results.extend(
+                CompletionItem(name)
+                for name, cmd in _complete_visible_commands(ctx.parent, incomplete)
+                if cmd != self
+            )
+
+        return results
 
     def main(self, args: t.Optional[t.Sequence[str]]=None, prog_name: t.Optional[str]=None, complete_var: t.Optional[str]=None, standalone_mode: bool=True, windows_expand_args: bool=True, **extra: t.Any) -> t.Any:
         """This is the way to invoke a script with all the bells and
@@ -659,7 +764,41 @@ class BaseCommand:
         .. versionchanged:: 3.0
            Added the ``standalone_mode`` parameter.
         """
-        pass
+        if args is None:
+            args = sys.argv[1:]
+
+        if prog_name is None:
+            prog_name = _detect_program_name()
+
+        # Expand args on Windows if requested
+        if windows_expand_args and sys.platform.startswith("win"):
+            args = _expand_args(args)
+
+        try:
+            try:
+                with self.make_context(prog_name, list(args), **extra) as ctx:
+                    self._main_shell_completion(ctx, extra, prog_name, complete_var)
+                    rv = self.invoke(ctx)
+                    if not standalone_mode:
+                        return rv
+                    ctx.exit()
+            except (EOFError, KeyboardInterrupt):
+                echo(file=sys.stderr)
+                raise Abort()
+            except ClickException as e:
+                if not standalone_mode:
+                    raise
+                e.show()
+                sys.exit(e.exit_code)
+            except IOError as e:
+                if e.errno == errno.EPIPE:
+                    sys.exit(1)
+                raise
+        except Abort:
+            if not standalone_mode:
+                raise
+            echo("Aborted!", file=sys.stderr)
+            sys.exit(1)
 
     def _main_shell_completion(self, ctx_args: t.MutableMapping[str, t.Any], prog_name: str, complete_var: t.Optional[str]=None) -> None:
         """Check if the shell is asking for tab completion, process
@@ -674,7 +813,20 @@ class BaseCommand:
         .. versionchanged:: 8.2.0
             Dots (``.``) in ``prog_name`` are replaced with underscores (``_``).
         """
-        pass
+        if complete_var is None:
+            complete_var = f"_{prog_name.replace('.', '_').upper()}_COMPLETE"
+
+        instruction = os.environ.get(complete_var)
+        if not instruction:
+            return
+
+        from .shell_completion import shell_complete
+
+        rv = shell_complete(self, ctx_args, instruction)
+
+        if rv is not None:
+            echo(rv, nl=False)
+            sys.exit(0)
 
     def __call__(self, *args: t.Any, **kwargs: t.Any) -> t.Any:
         """Alias for :meth:`main`."""
@@ -740,45 +892,78 @@ class Command(BaseCommand):
 
         Calls :meth:`format_usage` internally.
         """
-        pass
+        formatter = ctx.make_formatter()
+        self.format_usage(ctx, formatter)
+        return formatter.getvalue().rstrip('\n')
 
     def format_usage(self, ctx: Context, formatter: HelpFormatter) -> None:
         """Writes the usage line into the formatter.
 
         This is a low-level method called by :meth:`get_usage`.
         """
-        pass
+        pieces = self.collect_usage_pieces(ctx)
+        formatter.write_usage(ctx.command_path, ' '.join(pieces))
 
     def collect_usage_pieces(self, ctx: Context) -> t.List[str]:
         """Returns all the pieces that go into the usage line and returns
         it as a list of strings.
         """
-        pass
+        rv = [self.options_metavar]
+        for param in self.get_params(ctx):
+            rv.extend(param.get_usage_pieces(ctx))
+        if self.subcommand_metavar is not None:
+            rv.append(self.subcommand_metavar)
+        return rv
 
     def get_help_option_names(self, ctx: Context) -> t.List[str]:
         """Returns the names for the help option."""
-        pass
+        all_names = set(ctx.help_option_names)
+        for param in self.params:
+            all_names.difference_update(param.opts)
+            all_names.difference_update(param.secondary_opts)
+        return sorted(all_names)
 
     def get_help_option(self, ctx: Context) -> t.Optional['Option']:
         """Returns the help option object."""
-        pass
+        help_options = self.get_help_option_names(ctx)
+        if not help_options or not self.add_help_option:
+            return None
+
+        def show_help(ctx: Context, param: t.Union['Option', 'Parameter'], value: t.Any) -> None:
+            if value and not ctx.resilient_parsing:
+                echo(ctx.get_help(), color=ctx.color)
+                ctx.exit()
+
+        return Option(
+            help_options,
+            is_flag=True,
+            is_eager=True,
+            expose_value=False,
+            callback=show_help,
+            help='Show this message and exit.',
+        )
 
     def make_parser(self, ctx: Context) -> OptionParser:
         """Creates the underlying option parser for this command."""
-        pass
+        parser = OptionParser(ctx)
+        for param in self.get_params(ctx):
+            param.add_to_parser(parser, ctx)
+        return parser
 
     def get_help(self, ctx: Context) -> str:
         """Formats the help into a string and returns it.
 
         Calls :meth:`format_help` internally.
         """
-        pass
+        formatter = ctx.make_formatter()
+        self.format_help(ctx, formatter)
+        return formatter.getvalue().rstrip('\n')
 
     def get_short_help_str(self, limit: int=45) -> str:
         """Gets short help for the command or makes it by shortening the
         long help string.
         """
-        pass
+        return (self.short_help or self.help or '')[:limit]
 
     def format_help(self, ctx: Context, formatter: HelpFormatter) -> None:
         """Writes the help into the formatter if it exists.
@@ -792,25 +977,43 @@ class Command(BaseCommand):
         -   :meth:`format_options`
         -   :meth:`format_epilog`
         """
-        pass
+        self.format_usage(ctx, formatter)
+        self.format_help_text(ctx, formatter)
+        self.format_options(ctx, formatter)
+        self.format_epilog(ctx, formatter)
 
     def format_help_text(self, ctx: Context, formatter: HelpFormatter) -> None:
         """Writes the help text to the formatter if it exists."""
-        pass
+        if self.help:
+            formatter.write_paragraph()
+            with formatter.indentation():
+                formatter.write_text(self.help)
 
     def format_options(self, ctx: Context, formatter: HelpFormatter) -> None:
         """Writes all the options into the formatter if they exist."""
-        pass
+        opts = []
+        for param in self.get_params(ctx):
+            rv = param.get_help_record(ctx)
+            if rv is not None:
+                opts.append(rv)
+
+        if opts:
+            with formatter.section('Options'):
+                formatter.write_dl(opts)
 
     def format_epilog(self, ctx: Context, formatter: HelpFormatter) -> None:
         """Writes the epilog into the formatter if it exists."""
-        pass
+        if self.epilog:
+            formatter.write_paragraph()
+            with formatter.indentation():
+                formatter.write_text(self.epilog)
 
     def invoke(self, ctx: Context) -> t.Any:
         """Given a context, this invokes the attached callback (if it exists)
         in the right way.
         """
-        pass
+        if self.callback is not None:
+            return ctx.invoke(self.callback, **ctx.params)
 
     def shell_complete(self, ctx: Context, incomplete: str) -> t.List['CompletionItem']:
         """Return a list of completions for the incomplete value. Looks
@@ -821,7 +1024,20 @@ class Command(BaseCommand):
 
         .. versionadded:: 8.0
         """
-        pass
+        from .shell_completion import CompletionItem
+
+        results = []
+        # Add option names
+        for param in self.get_params(ctx):
+            results.extend(param.shell_complete(ctx, incomplete))
+        # Add any subcommands
+        if isinstance(self, MultiCommand):
+            results.extend(
+                CompletionItem(name)
+                for name, _ in _complete_visible_commands(self, incomplete)
+            )
+        # Filter based on incomplete
+        return [c for c in results if c.start_with(incomplete)]
 
 class MultiCommand(Command):
     """A multi command is the basic implementation of a command that
@@ -898,25 +1114,56 @@ class MultiCommand(Command):
 
         .. versionadded:: 3.0
         """
-        pass
+        def decorator(f: F) -> F:
+            if replace:
+                self._result_callback = f
+            else:
+                old_callback = self._result_callback
+                def new_callback(*args, **kwargs):
+                    return f(old_callback(*args, **kwargs), *args, **kwargs)
+                self._result_callback = new_callback
+            return f
+        return decorator
 
     def format_commands(self, ctx: Context, formatter: HelpFormatter) -> None:
         """Extra format methods for multi methods that adds all the commands
         after the options.
         """
-        pass
+        commands = []
+        for subcommand in self.list_commands(ctx):
+            cmd = self.get_command(ctx, subcommand)
+            # What is this, the tool lied about a command.  Ignore it
+            if cmd is None:
+                continue
+            if cmd.hidden:
+                continue
+
+            commands.append((subcommand, cmd))
+
+        # allow for 3 times the default spacing
+        if len(commands):
+            limit = formatter.width - 6 - max(len(cmd[0]) for cmd in commands)
+
+            rows = []
+            for subcommand, cmd in commands:
+                help = cmd.get_short_help_str(limit)
+                rows.append((subcommand, help))
+
+            if rows:
+                with formatter.section('Commands'):
+                    formatter.write_dl(rows)
 
     def get_command(self, ctx: Context, cmd_name: str) -> t.Optional[Command]:
         """Given a context and a command name, this returns a
         :class:`Command` object if it exists or returns `None`.
         """
-        pass
+        raise NotImplementedError()
 
     def list_commands(self, ctx: Context) -> t.List[str]:
         """Returns a list of subcommand names in the order they should
         appear.
         """
-        pass
+        return []
 
     def shell_complete(self, ctx: Context, incomplete: str) -> t.List['CompletionItem']:
         """Return a list of completions for the incomplete value. Looks
@@ -928,7 +1175,15 @@ class MultiCommand(Command):
 
         .. versionadded:: 8.0
         """
-        pass
+        from .shell_completion import CompletionItem
+
+        results = super().shell_complete(ctx, incomplete)
+        results.extend(
+            CompletionItem(name)
+            for name in self.list_commands(ctx)
+            if name.startswith(incomplete)
+        )
+        return results
 
 class Group(MultiCommand):
     """A group allows a command to have subcommands attached. This is
@@ -960,7 +1215,11 @@ class Group(MultiCommand):
         """Registers another :class:`Command` with this group.  If the name
         is not provided, the name of the command is used.
         """
-        pass
+        name = name or cmd.name
+        if name is None:
+            raise TypeError("Command has no name.")
+        _check_multicommand(self, name, cmd, register=True)
+        self.commands[name] = cmd
 
     def command(self, *args: t.Any, **kwargs: t.Any) -> t.Union[t.Callable[[t.Callable[..., t.Any]], Command], Command]:
         """A shortcut decorator for declaring and attaching a command to
@@ -977,7 +1236,16 @@ class Group(MultiCommand):
         .. versionchanged:: 8.0
             Added the :attr:`command_class` attribute.
         """
-        pass
+        from .decorators import command
+
+        def decorator(f):
+            cmd = command(*args, cls=self.command_class, **kwargs)(f)
+            self.add_command(cmd)
+            return cmd
+
+        if args and callable(args[0]):
+            return decorator(args[0])
+        return decorator
 
     def group(self, *args: t.Any, **kwargs: t.Any) -> t.Union[t.Callable[[t.Callable[..., t.Any]], 'Group'], 'Group']:
         """A shortcut decorator for declaring and attaching a group to
@@ -994,7 +1262,16 @@ class Group(MultiCommand):
         .. versionchanged:: 8.0
             Added the :attr:`group_class` attribute.
         """
-        pass
+        from .decorators import group
+
+        def decorator(f):
+            cmd = group(*args, cls=self.group_class, **kwargs)(f)
+            self.add_command(cmd)
+            return cmd
+
+        if args and callable(args[0]):
+            return decorator(args[0])
+        return decorator
 
 class CommandCollection(MultiCommand):
     """A command collection is a multi command that merges multiple multi
@@ -1012,13 +1289,18 @@ class CommandCollection(MultiCommand):
 
     def add_source(self, multi_cmd: MultiCommand) -> None:
         """Adds a new multi command to the chain dispatcher."""
-        pass
+        self.sources.append(multi_cmd)
 
 def _check_iter(value: t.Any) -> t.Iterator[t.Any]:
     """Check if the value is iterable but not a string. Raises a type
     error, or return an iterator over the value.
     """
-    pass
+    if isinstance(value, str):
+        raise TypeError("expected iterable, not string")
+    try:
+        return iter(value)
+    except TypeError:
+        raise TypeError("expected iterable")
 
 class Parameter:
     """A parameter to a command comes in two versions: they are either
@@ -1148,7 +1430,19 @@ class Parameter:
 
         .. versionadded:: 8.0
         """
-        pass
+        return {
+            "name": self.name,
+            "param_type_name": self.param_type_name,
+            "opts": self.opts,
+            "secondary_opts": self.secondary_opts,
+            "type": str(self.type),
+            "required": self.required,
+            "nargs": self.nargs,
+            "multiple": self.multiple,
+            "default": self.default,
+            "envvar": self.envvar,
+            "help": self.help,
+        }
 
     def __repr__(self) -> str:
         return f'<{self.__class__.__name__} {self.name}>'
@@ -1158,7 +1452,7 @@ class Parameter:
         """Returns the human readable name of this parameter.  This is the
         same as the name for options, but the metavar for arguments.
         """
-        pass
+        return self.name if self.name is not None else self.opts[0] if self.opts else None
 
     def get_default(self, ctx: Context, call: bool=True) -> t.Optional[t.Union[t.Any, t.Callable[[], t.Any]]]:
         """Get the default for the parameter. Tries
@@ -1181,19 +1475,38 @@ class Parameter:
         .. versionchanged:: 8.0
             Added the ``call`` parameter.
         """
-        pass
+        value = ctx.lookup_default(self.name) if ctx is not None else None
+        if value is None:
+            value = self.default
+
+        if call and callable(value):
+            return value()
+
+        return value
 
     def type_cast_value(self, ctx: Context, value: t.Any) -> t.Any:
         """Convert and validate a value against the option's
         :attr:`type`, :attr:`multiple`, and :attr:`nargs`.
         """
-        pass
+        if value is None:
+            return value
+
+        if self.multiple and not isinstance(value, tuple):
+            value = (value,)
+
+        if self.nargs != 1:
+            return tuple(self.type(ctx, x, self) for x in value)
+
+        return self.type(ctx, value, self)
 
     def get_error_hint(self, ctx: Context) -> str:
         """Get a stringified version of the param for use in error messages to
         indicate which param caused the error.
         """
-        pass
+        if self.param_type_name == 'option':
+            return f"'{self.opts[0]}'"
+        else:
+            return f"'{self.name}'"
 
     def shell_complete(self, ctx: Context, incomplete: str) -> t.List['CompletionItem']:
         """Return a list of completions for the incomplete value. If a
@@ -1206,7 +1519,17 @@ class Parameter:
 
         .. versionadded:: 8.0
         """
-        pass
+        from .shell_completion import CompletionItem
+
+        if self._custom_shell_complete is not None:
+            results = self._custom_shell_complete(ctx, self, incomplete)
+
+            if results and isinstance(results[0], str):
+                results = [CompletionItem(c) for c in results]
+
+            return results
+
+        return self.type.shell_complete(ctx, self, incomplete)
 
 class Option(Parameter):
     """Options are usually optional values on the command line and
@@ -1344,7 +1667,23 @@ class Option(Parameter):
         user until a valid value exists and then returns the processed
         value as result.
         """
-        pass
+        # Calculate the default before prompting anything to be stable.
+        default = self.get_default(ctx)
+
+        # If this is a prompt for a flag we need to handle this
+        # differently.
+        if self.is_bool_flag:
+            return confirm(self.prompt, default)
+
+        return prompt(
+            self.prompt,
+            default=default,
+            type=self.type,
+            hide_input=self.hide_input,
+            show_choices=self.show_choices,
+            confirmation_prompt=self.confirmation_prompt,
+            value_proc=lambda x: self.process_value(ctx, x),
+        )
 
 class Argument(Parameter):
     """Arguments are positional parameters to a command.  They generally
