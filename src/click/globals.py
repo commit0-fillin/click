@@ -20,19 +20,29 @@ def get_current_context(silent: bool=False) -> t.Optional['Context']:
                    is available.  The default behavior is to raise a
                    :exc:`RuntimeError`.
     """
-    pass
+    try:
+        return t.cast('Context', _local.stack[-1])
+    except (AttributeError, IndexError):
+        if not silent:
+            raise RuntimeError('There is no active click context.')
+        return None
 
 def push_context(ctx: 'Context') -> None:
     """Pushes a new context to the current stack."""
-    pass
+    _local.__dict__.setdefault('stack', []).append(ctx)
 
 def pop_context() -> None:
     """Removes the top level from the stack."""
-    pass
+    _local.stack.pop()
 
 def resolve_color_default(color: t.Optional[bool]=None) -> t.Optional[bool]:
     """Internal helper to get the default value of the color flag.  If a
     value is passed it's returned unchanged, otherwise it's looked up from
     the current context.
     """
-    pass
+    if color is not None:
+        return color
+    ctx = get_current_context(silent=True)
+    if ctx is not None:
+        return ctx.color
+    return None
