@@ -52,17 +52,19 @@ class Result:
     @property
     def output(self) -> str:
         """The (standard) output as unicode string."""
-        pass
+        return self.stdout
 
     @property
     def stdout(self) -> str:
         """The standard output as unicode string."""
-        pass
+        return self.stdout_bytes.decode(self.runner.charset, 'replace')
 
     @property
     def stderr(self) -> str:
         """The standard error as unicode string."""
-        pass
+        if self.stderr_bytes is None:
+            raise ValueError("stderr not separately captured")
+        return self.stderr_bytes.decode(self.runner.charset, 'replace')
 
     def __repr__(self) -> str:
         exc_str = repr(self.exception) if self.exception else 'okay'
@@ -98,11 +100,14 @@ class CliRunner:
         for it.  The default is the `name` attribute or ``"root"`` if not
         set.
         """
-        pass
+        return cli.name or "root"
 
     def make_env(self, overrides: t.Optional[t.Mapping[str, t.Optional[str]]]=None) -> t.Mapping[str, t.Optional[str]]:
         """Returns the environment overrides for invoking a script."""
-        pass
+        env = dict(self.env)
+        if overrides:
+            env.update(overrides)
+        return env
 
     @contextlib.contextmanager
     def isolation(self, input: t.Optional[t.Union[str, bytes, t.IO[t.Any]]]=None, env: t.Optional[t.Mapping[str, t.Optional[str]]]=None, color: bool=False) -> t.Iterator[t.Tuple[io.BytesIO, t.Optional[io.BytesIO]]]:
@@ -126,7 +131,119 @@ class CliRunner:
         .. versionchanged:: 4.0
             Added the ``color`` parameter.
         """
-        pass
+        if input is None:
+            input = b''
+        elif isinstance(input, str):
+            input = input.encode(self.charset)
+
+        old_stdin = sys.stdin
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        old_forced_width = formatting.FORCED_WIDTH
+        old_environ = os.environ
+        env = self.make_env(env)
+
+        bytes_output = io.BytesIO()
+        bytes_error = io.BytesIO()
+
+        if PY2:
+            input = io.BytesIO(input)
+            output = bytes_output
+            error = bytes_error
+        else:
+            text_input = io.TextIOWrapper(io.BytesIO(input), encoding=self.charset)
+            text_output = io.TextIOWrapper(
+                bytes_output, encoding=self.charset, errors="backslashreplace"
+            )
+            text_error = io.TextIOWrapper(
+                bytes_error, encoding=self.charset, errors="backslashreplace"
+            )
+            input = text_input
+            output = text_output
+            error = text_error
+
+        if self.echo_stdin:
+            input = EchoingStdin(input, output)
+
+        sys.stdin = input
+        sys.stdout = output
+        sys.stderr = error
+        sys.argv = self.get_default_argv()
+        os.environ = env
+        formatting.FORCED_WIDTH = 80
+
+        def visible_input(prompt=None):
+            sys.stdout.write(prompt or '')
+            val = input.readline().rstrip('\r\n')
+            sys.stdout.write(f'{val}\n')
+            sys.stdout.flush()
+            return val
+
+        def hidden_input(prompt=None):
+            sys.stdout.write((prompt or '') + '\n')
+            sys.stdout.flush()
+            return input.readline().rstrip('\r\n')
+
+        def _getchar(echo):
+            char = sys.stdin.read(1)
+            if echo:
+                sys.stdout.write(char)
+                sys.stdout.flush()
+            return char
+
+        old_visible_prompt_func = termui.visible_prompt_func
+        old_hidden_prompt_func = termui.hidden_prompt_func
+        old__getchar_func = termui._getchar
+        termui.visible_prompt_func = visible_input
+        termui.hidden_prompt_func = hidden_input
+        termui._getchar = _getchar
+
+        old_utils_echo = utils.echo
+
+        def echo(message=None, file=None, nl=True, err=False, color=None):
+            if file is None:
+                file = sys.stdout if not err else sys.stderr
+            old_utils_echo(message, file, nl, err, color)
+
+        utils.echo = echo
+
+        old_utils_get_binary_stream = utils.get_binary_stream
+
+        def get_binary_stream(name):
+            if name == 'stdout':
+                return bytes_output
+            elif name == 'stderr':
+                return bytes_error
+            return old_utils_get_binary_stream(name)
+
+        utils.get_binary_stream = get_binary_stream
+
+        old_utils_get_text_stream = utils.get_text_stream
+
+        def get_text_stream(name, encoding=None, errors='strict'):
+            if name == 'stdout':
+                return output
+            elif name == 'stderr':
+                return error
+            return old_utils_get_text_stream(name, encoding, errors)
+
+        utils.get_text_stream = get_text_stream
+
+        try:
+            yield bytes_output, bytes_error
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+            sys.stdin = old_stdin
+            sys.argv = sys.argv
+            os.environ = old_environ
+            formatting.FORCED_WIDTH = old_forced_width
+            termui.visible_prompt_func = old_visible_prompt_func
+            termui.hidden_prompt_func = old_hidden_prompt_func
+            termui._getchar = old__getchar_func
+            utils.echo = old_utils_echo
+            utils.get_binary_stream = old_utils_get_binary_stream
+            utils.get_text_stream = old_utils_get_text_stream
 
     def invoke(self, cli: 'BaseCommand', args: t.Optional[t.Union[str, t.Sequence[str]]]=None, input: t.Optional[t.Union[str, bytes, t.IO[t.Any]]]=None, env: t.Optional[t.Mapping[str, t.Optional[str]]]=None, catch_exceptions: bool=True, color: bool=False, **extra: t.Any) -> Result:
         """Invokes a command in an isolated environment.  The arguments are
@@ -163,7 +280,35 @@ class CliRunner:
             The result object has the ``exc_info`` attribute with the
             traceback if available.
         """
-        pass
+        if isinstance(args, str):
+            args = shlex.split(args)
+
+        with self.isolation(input=input, env=env, color=color) as outstreams:
+            return_value = None
+            exception = None
+            exc_info = None
+            if catch_exceptions:
+                try:
+                    return_value = cli.main(args=args or (), prog_name=self.get_default_prog_name(cli), **extra)
+                except SystemExit as e:
+                    exc_info = sys.exc_info()
+                    exception = e
+                except Exception as e:
+                    exc_info = sys.exc_info()
+                    exception = e
+            else:
+                return_value = cli.main(args=args or (), prog_name=self.get_default_prog_name(cli), **extra)
+
+            output = outstreams[0].getvalue()
+            stderr = outstreams[1].getvalue()
+
+        return Result(runner=self,
+                      stdout_bytes=output,
+                      stderr_bytes=stderr,
+                      return_value=return_value,
+                      exit_code=exception.code if exception is not None and isinstance(exception, SystemExit) else 0,
+                      exception=exception,
+                      exc_info=exc_info)
 
     @contextlib.contextmanager
     def isolated_filesystem(self, temp_dir: t.Optional[t.Union[str, 'os.PathLike[str]']]=None) -> t.Iterator[str]:
@@ -179,4 +324,20 @@ class CliRunner:
         .. versionchanged:: 8.0
             Added the ``temp_dir`` parameter.
         """
-        pass
+        cwd = os.getcwd()
+        if temp_dir is not None:
+            temp_dir = os.path.abspath(temp_dir)
+            fs = tempfile.mkdtemp(dir=temp_dir)
+            os.chdir(fs)
+        else:
+            fs = tempfile.mkdtemp()
+            os.chdir(fs)
+        try:
+            yield fs
+        finally:
+            os.chdir(cwd)
+            if temp_dir is None:
+                try:
+                    shutil.rmtree(fs)
+                except OSError:
+                    pass
