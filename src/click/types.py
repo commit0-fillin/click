@@ -454,7 +454,10 @@ class Path(ParamType):
 
         .. versionadded:: 8.0
         """
-        pass
+        from .shell_completion import CompletionItem
+        if self.dir_okay and not self.file_okay:
+            return [CompletionItem(incomplete, type='dir')]
+        return [CompletionItem(incomplete, type='file')]
 
 class Tuple(CompositeParamType):
     """The default behavior of Click is to apply a type on a value directly.
